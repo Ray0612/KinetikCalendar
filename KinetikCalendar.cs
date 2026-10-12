@@ -1296,7 +1296,7 @@ class CalApp : ApplicationContext
     {
         ArmMinute();
         if (locked) return;
-        if (DateTime.Today != shownDay) { shownDay = DateTime.Today; Widget.P.Selected = null; Rebuild(); Sync(); }
+        if (DateTime.Today != shownDay) { shownDay = DateTime.Today; Widget.P.Selected = null; Widget.P.ViewOffset = 0; Rebuild(); Sync(); }
         else Widget.Render(false);
         Widget.Shimmer();
     }
@@ -1336,11 +1336,18 @@ class CalApp : ApplicationContext
     {
         var today = DateTime.Today;
         DateTime from = today, to = today.AddDays(Math.Max(1, Cfg.Days));
-        var gs = Painter.GridStart(today, Cfg.FirstDow);
+        var anchor = Widget.P.ViewAnchor(today); // the month (or week) the calendar has been moved to
+        var gs = Cfg.MonthStyle == 1 ? anchor.AddDays(-7) : Painter.GridStart(anchor, Cfg.FirstDow);
         if (Cfg.MonthStyle != 2)
         {
             if (gs < from) from = gs;
             if (gs.AddDays(42) > to) to = gs.AddDays(42);
+        }
+        var sel = Widget.P.Selected;
+        if (sel.HasValue)
+        {
+            if (sel.Value < from) from = sel.Value;
+            if (sel.Value.AddDays(1) > to) to = sel.Value.AddDays(1);
         }
         var all = new List<CalEvent>();
         foreach (var f in Cfg.Feeds)
@@ -1577,9 +1584,9 @@ class Painter : IDisposable
             case 0: return LineH + (r.Sub != null ? SubH : 0) + (r.Now && c.ProgressBars ? 9 * U : 0) + Gap;
             case 1: return firstInCard ? 18 * U : (c.Density == 0 ? 24 : c.Density == 2 ? 34 : 30) * U;
             case 2: return 30 * U;
-            case 3: return (18 + Weeks(DateTime.Today, c.FirstDow) * 23 + 4) * U;
+            case 3: return (NavH + 18 + Weeks(ViewAnchor(DateTime.Today), c.FirstDow) * 23 + 4) * U;
             case 5: return 66 * U;
-            case 6: return (18 + 23 + 6) * U;
+            case 6: return (NavH + 18 + 23 + 6) * U;
             default: return 24 * U;
         }
     }
@@ -1711,7 +1718,7 @@ class Painter : IDisposable
         WinH = (int)CardH + Margin * 2;
 
         var sb = new StringBuilder();
-        sb.Append(c.Rev).Append('|').Append(WinW).Append('x').Append(WinH).Append('|').Append(Th.Name).Append('|').Append(Selected).Append('|').Append(HoverDay);
+        sb.Append(c.Rev).Append('|').Append(WinW).Append('x').Append(WinH).Append('|').Append(Th.Name).Append('|').Append(Selected).Append('|').Append(HoverDay).Append('|').Append(ViewOffset).Append('|').Append(HoverNav);
         foreach (var r in head.Concat(body))
             sb.Append('|').Append(r.Kind).Append(r.Label).Append(r.Value).Append(r.Sub).Append(r.Extra).Append(r.Dim).Append(r.Now ? r.Frac.ToString("0.00") : "");
         Key = sb.ToString();
@@ -1727,6 +1734,7 @@ class Painter : IDisposable
         target.PixelOffsetMode = PixelOffsetMode.HighQuality;
         Hits.Clear();
         DayHits.Clear();
+        NavPrev = NavNext = NavToday = GridArea = RectangleF.Empty;
 
         int alpha = (int)Math.Round(c.Opacity * 2.55);
         float cardH = DrawCardH > 0 ? DrawCardH : CardH;
@@ -1967,12 +1975,69 @@ class Painter : IDisposable
         Hits.Add(new Hit { R = rowRect, Ev = r.Ev });
     }
 
+    // ---- moving between months (or weeks, in the week view)
+    const float NavH = 24;
+    public int ViewOffset;        // months (or weeks) away from now
+    public float GridShift;       // horizontal slide while changing month, in pixels
+    public int HoverNav;          // -1 previous, 1 next, 2 today, 0 none
+    public RectangleF NavPrev, NavNext, NavToday, GridArea;
+
+    public DateTime ViewAnchor(DateTime today)
+    {
+        if (c.MonthStyle == 1)
+            return today.AddDays(-(((int)today.DayOfWeek - (int)c.FirstDow + 7) % 7)).AddDays(7 * ViewOffset);
+        return new DateTime(today.Year, today.Month, 1).AddMonths(ViewOffset);
+    }
+
+    void PaintNav(Graphics g, float x0, float x1, float y, bool weekOnly, DateTime anchor)
+    {
+        string label = weekOnly
+            ? (ViewOffset == 0 ? "This week" : ViewOffset == 1 ? "Next week" : ViewOffset == -1 ? "Last week" : "Week of " + anchor.ToString("d MMM"))
+            : anchor.Year == DateTime.Today.Year ? anchor.ToString("MMMM") : anchor.ToString("MMMM yyyy");
+        brush.Color = ViewOffset == 0 ? Th.Text : Th.Accent;
+        g.DrawString(label, fValue, brush, new RectangleF(x0, y, x1 - x0 - 90 * U, 18 * U), Trim);
+
+        float bw = 22 * U, bh = 20 * U, by = y - 1 * U;
+        NavNext = new RectangleF(x1 - bw, by, bw, bh);
+        NavPrev = new RectangleF(x1 - bw * 2 - 2 * U, by, bw, bh);
+        NavToday = RectangleF.Empty;
+        if (ViewOffset != 0)
+        {
+            float tw = g.MeasureString("Today", fSmall, PointF.Empty, Typo).Width + 14 * U;
+            NavToday = new RectangleF(NavPrev.X - tw - 6 * U, by + 1 * U, tw, bh - 2 * U);
+            Draw.Fill(g, NavToday, NavToday.Height / 2, Color.FromArgb(HoverNav == 2 ? 70 : 40, Th.Accent));
+            brush.Color = Th.Accent;
+            g.DrawString("Today", fSmall, brush, NavToday, Center);
+        }
+        var hover = Color.FromArgb(Th.Light ? 16 : 24, Th.Text);
+        if (HoverNav == -1) Draw.Fill(g, NavPrev, 6 * U, hover);
+        if (HoverNav == 1) Draw.Fill(g, NavNext, 6 * U, hover);
+        using (var p = new Pen(Th.Sub, 1.6f * U) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+        {
+            float s = 4 * U;
+            PointF a = new PointF(NavPrev.X + bw / 2 + s / 2, NavPrev.Y + bh / 2 - s), b = new PointF(NavPrev.X + bw / 2 - s / 2, NavPrev.Y + bh / 2), c2 = new PointF(a.X, NavPrev.Y + bh / 2 + s);
+            g.DrawLines(p, new[] { a, b, c2 });
+            a = new PointF(NavNext.X + bw / 2 - s / 2, NavNext.Y + bh / 2 - s); b = new PointF(NavNext.X + bw / 2 + s / 2, NavNext.Y + bh / 2); c2 = new PointF(a.X, NavNext.Y + bh / 2 + s);
+            g.DrawLines(p, new[] { a, b, c2 });
+        }
+    }
+
     void PaintMonth(Graphics g, float x0, float x1, float y, bool weekOnly)
     {
         var today = DateTime.Today;
         var fdw = c.FirstDow;
-        var start = weekOnly ? today.AddDays(-(((int)today.DayOfWeek - (int)fdw + 7) % 7)) : GridStart(today, fdw);
-        int weeks = weekOnly ? 1 : Weeks(today, fdw);
+        var anchor = ViewAnchor(today);
+        PaintNav(g, x0, x1, y, weekOnly, anchor);
+        y += NavH * U;
+        var start = weekOnly ? anchor : GridStart(anchor, fdw);
+        int weeks = weekOnly ? 1 : Weeks(anchor, fdw);
+        GridArea = new RectangleF(x0, y - NavH * U, x1 - x0, (NavH + 18) * U + 23 * U * weeks);
+        var st = g.Save();
+        if (Math.Abs(GridShift) > 0.5f) // slides in from the side it's coming from
+        {
+            g.SetClip(new RectangleF(x0 - 4 * U, y - 4 * U, x1 - x0 + 8 * U, 18 * U + 23 * U * weeks + 10 * U), CombineMode.Intersect);
+            g.TranslateTransform(GridShift, 0);
+        }
         float wn = c.WeekNumbers ? 24 * U : 0;
         float cw = (x1 - x0 - wn) / 7, rh = 23 * U, top = y + 18 * U;
         var dtf = CultureInfo.CurrentCulture.DateTimeFormat;
@@ -2005,7 +2070,7 @@ class Painter : IDisposable
             {
                 var day = start.AddDays(w * 7 + i);
                 float cx = x0 + wn + cw * (i + 0.5f), cy = top + rh * w + 9 * U;
-                bool isToday = day == today, inMonth = weekOnly || day.Month == today.Month;
+                bool isToday = day == today, inMonth = weekOnly || day.Month == anchor.Month;
                 bool picked = Selected.HasValue && Selected.Value == day;
                 var cell = new RectangleF(cx - cw / 2 + 1 * U, cy - 10 * U, cw - 2 * U, rh - 1 * U);
                 DayHits.Add(new KeyValuePair<RectangleF, DateTime>(cell, day));
@@ -2045,6 +2110,7 @@ class Painter : IDisposable
                 }
             }
         }
+        g.Restore(st);
     }
 }
 
@@ -2065,7 +2131,8 @@ class WidgetForm : Form
     readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 15 };
     readonly Stopwatch clock = Stopwatch.StartNew();
     double appearAt = -1, heightAt = -1, shimmerAt = -1, last;
-    float heightFrom, hoverTarget, scrollTarget;
+    float heightFrom, hoverTarget, scrollTarget, slideFrom;
+    double slideAt = -1;
     string lastKey;
     float lastCardH;
     bool dragging, moved, clickThrough, shown;
@@ -2164,6 +2231,12 @@ class WidgetForm : Form
             active = true;
         }
         else P.Scroll = scrollTarget;
+        if (slideAt >= 0)
+        {
+            float t = Draw.Ease((float)((now - slideAt) / 240));
+            P.GridShift = slideFrom * (1 - t);
+            if (t >= 1) { slideAt = -1; P.GridShift = 0; } else active = true;
+        }
         if (shimmerAt >= 0)
         {
             P.Shimmer = (float)((now - shimmerAt) / 1100);
@@ -2186,6 +2259,28 @@ class WidgetForm : Form
     {
         foreach (var h in P.DayHits) if (h.Key.Contains(p)) return h.Value;
         return null;
+    }
+
+    int NavAt(Point p)
+    {
+        if (P.NavPrev.Contains(p)) return -1;
+        if (P.NavNext.Contains(p)) return 1;
+        if (P.NavToday.Contains(p)) return 2;
+        return 0;
+    }
+
+    // Moves the calendar a month (or week) back or forward, or (0) back to now. The days slide in from that side.
+    void Nav(int dir)
+    {
+        int before = P.ViewOffset;
+        P.ViewOffset = dir == 0 ? 0 : P.ViewOffset + dir;
+        if (P.ViewOffset == before) return;
+        if (c.Animate)
+        {
+            slideFrom = (P.ViewOffset > before ? 1 : -1) * 48 * P.U;
+            P.GridShift = slideFrom; slideAt = Now; Kick();
+        }
+        app.Rebuild();
     }
 
     // Clicking a day in the month or week view jumps the agenda to it. A day outside the agenda's range
@@ -2250,15 +2345,16 @@ class WidgetForm : Form
         if (ev != null && ev != P.Hover) { P.Hover = ev; P.HoverA = c.Animate ? 0 : 1; hoverTarget = 1; Changed(); }
         else if (ev == null && hoverTarget > 0) { hoverTarget = 0; if (!c.Animate) P.HoverA = 0; Changed(); }
         var day = dragging && moved ? null : DayAt(e.Location);
-        if (day != P.HoverDay) { P.HoverDay = day; Frame(); }
-        Cursor = dragging && moved ? Cursors.SizeAll : day != null || (ev != null && c.ClickOpens && Feed.WebUrl(ev.Feed, DateTime.Today) != null) ? Cursors.Hand : Cursors.Default;
+        int nav = dragging && moved ? 0 : NavAt(e.Location);
+        if (day != P.HoverDay || nav != P.HoverNav) { P.HoverDay = day; P.HoverNav = nav; Frame(); }
+        Cursor = dragging && moved ? Cursors.SizeAll : day != null || nav != 0 || (ev != null && c.ClickOpens && Feed.WebUrl(ev.Feed, DateTime.Today) != null) ? Cursors.Hand : Cursors.Default;
         base.OnMouseMove(e);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
         if (hoverTarget > 0) { hoverTarget = 0; if (!c.Animate) P.HoverA = 0; Changed(); }
-        if (P.HoverDay != null) { P.HoverDay = null; Frame(); }
+        if (P.HoverDay != null || P.HoverNav != 0) { P.HoverDay = null; P.HoverNav = 0; Frame(); }
         base.OnMouseLeave(e);
     }
 
@@ -2270,6 +2366,7 @@ class WidgetForm : Form
             bool wasDrag = dragging && moved;
             dragging = false;
             if (wasDrag) c.Save();
+            else if (NavAt(e.Location) != 0) { int n = NavAt(e.Location); Nav(n == 2 ? 0 : n); }
             else if (DayAt(e.Location).HasValue) SelectDay(DayAt(e.Location).Value);
             else if (c.ClickOpens)
             {
@@ -2283,7 +2380,8 @@ class WidgetForm : Form
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
-        if (P.MaxScroll > 0)
+        if (P.GridArea.Contains(e.Location)) Nav(e.Delta > 0 ? -1 : 1); // over the calendar: previous / next month
+        else if (P.MaxScroll > 0)
         {
             scrollTarget = Math.Max(0, Math.Min(P.MaxScroll, scrollTarget - e.Delta / 120f * 48 * P.U));
             if (!c.Animate) P.Scroll = scrollTarget;
