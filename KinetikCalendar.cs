@@ -135,7 +135,7 @@ class Feed
 class Settings
 {
     const string KeyPath = @"Software\KinetikCalendar";
-    public int X = int.MinValue, Y = int.MinValue, Width = 320, Scale = 100, Opacity = 92, Round = 100, Days = 7, Layer = 0, SyncMin = 15;
+    public int X = int.MinValue, Y = int.MinValue, Width = 320, Scale = 100, Opacity = 92, Round = 100, Days = 7, Layer = 0, SyncMin = 15, MaxHeight = 0; // MaxHeight 0 = as tall as the screen allows
     public bool Locked, Snap = true, Shadow = true, Border = true, ClickThrough, Animate = true, ClickOpens = true;
     public string ThemeName = "Midnight", FontName = "";
     public int Accent, BgColor; // ARGB; 0 means the theme's own
@@ -161,7 +161,7 @@ class Settings
 
     static readonly string[] LookFields =
     {
-        "Width", "Scale", "Opacity", "Round", "Shadow", "Border", "ThemeName", "FontName", "Accent", "BgColor",
+        "Width", "MaxHeight", "Scale", "Opacity", "Round", "Shadow", "Border", "ThemeName", "FontName", "Accent", "BgColor",
         "Density", "Marker", "MonthStyle", "FirstDay", "TitleStyle", "WeekNumbers", "ShadeWeekends",
     };
 
@@ -1462,8 +1462,14 @@ class Painter : IDisposable
     public float CardW, CardH, Pad, BodyTop, BodyView, BodyFull;
     public string Key = "";
     public float MaxScroll { get { return Math.Max(0, BodyFull - BodyView); } }
+    public float BodyBottom { get { return CardH - Pad + Gap; } }
+
+    // The scrollbar track and thumb, in card coordinates (add Margin for window coordinates)
+    public float ThumbH { get { float viewH = BodyBottom - BodyTop; return Math.Min(viewH, Math.Max(24 * U, viewH * BodyView / Math.Max(1, BodyFull))); } }
+    public float ThumbY { get { return BodyTop + (BodyBottom - BodyTop - ThumbH) * (MaxScroll > 0 ? Scroll / MaxScroll : 0); } }
 
     // Animation state, set by the window
+    public bool ThumbDrag;
     public float Scroll, Appear = 1, HoverA, Shimmer = -1, Spin = -1, DrawCardH = -1;
     public CalEvent Hover;
 
@@ -1674,6 +1680,7 @@ class Painter : IDisposable
         CardW = Math.Max(200, (int)(c.Width * U));
         float full = Pad * 2 + headH + BodyFull - Gap;
         float maxCard = Math.Max(160 * U, maxWinH - Margin * 2);
+        if (c.MaxHeight > 0) maxCard = Math.Max(160 * U, Math.Min(maxCard, c.MaxHeight * U));
         CardH = (float)Math.Ceiling(Math.Min(full, maxCard));
         BodyTop = Pad + headH;
         BodyView = CardH - BodyTop - Pad + Gap;
@@ -1756,9 +1763,9 @@ class Painter : IDisposable
             if (Scroll < MaxScroll - 0.5f)
                 using (var lg = new LinearGradientBrush(new RectangleF(card.X, bodyBottom - f - 1, card.Width, f + 1), Color.FromArgb(0, Th.Bg), bg, 90f))
                     g.FillRectangle(lg, card.X, bodyBottom - f, card.Width, f);
-            float viewH = bodyBottom - bodyTop, thumb = Math.Max(24 * U, viewH * BodyView / BodyFull);
-            float ty = bodyTop + (viewH - thumb) * (Scroll / MaxScroll);
-            Draw.Fill(g, new RectangleF(card.Right - 6 * U, ty, 3 * U, thumb), 1.5f * U, Color.FromArgb(70, Th.Sub));
+            float thumb = ThumbH, ty = card.Y + ThumbY, w = (ThumbDrag ? 5 : 4) * U;
+            Draw.Fill(g, new RectangleF(card.Right - 3 * U - w, bodyTop, w, bodyBottom - bodyTop), w / 2, Color.FromArgb(22, Th.Sub));
+            Draw.Fill(g, new RectangleF(card.Right - 3 * U - w, ty, w, thumb), w / 2, Color.FromArgb(ThumbDrag ? 150 : 95, Th.Sub));
         }
         g.Restore(state);
         if (crisp)
@@ -1977,8 +1984,17 @@ class Painter : IDisposable
                 bool isToday = day == today, inMonth = weekOnly || day.Month == today.Month;
                 if (isToday)
                 {
+                    // Centre the circle on the digits as they're actually drawn: text layout pads the box by a
+                    // font-dependent amount, so the box's centre isn't where the glyphs land.
+                    float ccx = cx, ccy = cy;
+                    using (var path = new GraphicsPath())
+                    {
+                        path.AddString(day.Day.ToString(), fDayBold.FontFamily, (int)fDayBold.Style, fDayBold.Size, new RectangleF(cx - cw / 2, cy - 9 * U, cw, 18 * U), Center);
+                        var gb = path.GetBounds();
+                        if (gb.Width > 0) { ccx = gb.X + gb.Width / 2; ccy = gb.Y + gb.Height / 2; }
+                    }
                     float rr = 10 * U * pop;
-                    if (rr > 0.5f) using (var b = new SolidBrush(Th.Accent)) g.FillEllipse(b, cx - rr, cy - rr, rr * 2, rr * 2);
+                    if (rr > 0.5f) using (var b = new SolidBrush(Th.Accent)) g.FillEllipse(b, ccx - rr, ccy - rr, rr * 2, rr * 2);
                 }
                 bool accentLight = Th.Accent.GetBrightness() > 0.7f;
                 brush.Color = isToday ? (accentLight ? Color.FromArgb(20, 20, 24) : Color.White) : !inMonth ? Color.FromArgb(70, Th.Sub) : day < today ? Th.Sub : Th.Text;
@@ -2019,6 +2035,7 @@ class WidgetForm : Form
     float lastCardH;
     bool dragging, moved, clickThrough, shown;
     Point grab, downAt;
+    float thumbGrab;
 
     public WidgetForm(CalApp app)
     {
@@ -2132,6 +2149,16 @@ class WidgetForm : Form
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.Left && OnScrollbar(e.Location))
+        {
+            // Grab the thumb, or jump to where the track was clicked
+            float ty = P.Margin + P.ThumbY;
+            thumbGrab = e.Y >= ty && e.Y <= ty + P.ThumbH ? e.Y - ty : P.ThumbH / 2;
+            P.ThumbDrag = true;
+            DragThumb(e.Y);
+            base.OnMouseDown(e);
+            return;
+        }
         if (e.Button == MouseButtons.Left)
         {
             downAt = Cursor.Position; moved = false;
@@ -2140,8 +2167,25 @@ class WidgetForm : Form
         base.OnMouseDown(e);
     }
 
+    bool OnScrollbar(Point p)
+    {
+        if (P.MaxScroll <= 0.5f) return false;
+        float right = P.Margin + P.CardW;
+        return p.X >= right - 14 * P.U && p.X <= right && p.Y >= P.Margin + P.BodyTop && p.Y <= P.Margin + P.BodyBottom;
+    }
+
+    void DragThumb(int y)
+    {
+        float track = P.BodyBottom - P.BodyTop - P.ThumbH;
+        if (track <= 0) return;
+        float f = (y - thumbGrab - P.Margin - P.BodyTop) / track;
+        scrollTarget = P.Scroll = Math.Max(0, Math.Min(P.MaxScroll, f * P.MaxScroll));
+        Frame();
+    }
+
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        if (P.ThumbDrag) { DragThumb(e.Y); base.OnMouseMove(e); return; }
         if (dragging && (moved || Math.Abs(Cursor.Position.X - downAt.X) + Math.Abs(Cursor.Position.Y - downAt.Y) > 4))
         {
             moved = true;
@@ -2149,7 +2193,7 @@ class WidgetForm : Form
             c.X = p.X; c.Y = p.Y;
             SetWindowPos(Handle, IntPtr.Zero, p.X, p.Y, 0, 0, 0x1 | 0x4 | 0x10); // NOSIZE | NOZORDER | NOACTIVATE
         }
-        var ev = dragging && moved ? null : HitAt(e.Location);
+        var ev = dragging && moved || OnScrollbar(e.Location) ? null : HitAt(e.Location);
         if (ev != null && ev != P.Hover) { P.Hover = ev; P.HoverA = c.Animate ? 0 : 1; hoverTarget = 1; Changed(); }
         else if (ev == null && hoverTarget > 0) { hoverTarget = 0; if (!c.Animate) P.HoverA = 0; Changed(); }
         Cursor = dragging && moved ? Cursors.SizeAll : ev != null && c.ClickOpens && Feed.WebUrl(ev.Feed, DateTime.Today) != null ? Cursors.Hand : Cursors.Default;
@@ -2164,6 +2208,7 @@ class WidgetForm : Form
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
+        if (P.ThumbDrag) { P.ThumbDrag = false; Frame(); base.OnMouseUp(e); return; }
         if (e.Button == MouseButtons.Left)
         {
             bool wasDrag = dragging && moved;
@@ -2393,6 +2438,11 @@ static class UI
                     g.DrawLines(p, new[] { P(0.26f, 0.36f), P(0.12f, 0.5f), P(0.26f, 0.64f) });
                     g.DrawLines(p, new[] { P(0.74f, 0.36f), P(0.88f, 0.5f), P(0.74f, 0.64f) });
                     break;
+                case "height":
+                    g.DrawLine(p, P(0.5f, 0.12f), P(0.5f, 0.88f));
+                    g.DrawLines(p, new[] { P(0.36f, 0.26f), P(0.5f, 0.12f), P(0.64f, 0.26f) });
+                    g.DrawLines(p, new[] { P(0.36f, 0.74f), P(0.5f, 0.88f), P(0.64f, 0.74f) });
+                    break;
                 case "round":
                     g.DrawLine(p, P(0.2f, 0.86f), P(0.2f, 0.52f)); g.DrawArc(p, R(0.2f, 0.2f, 0.64f, 0.64f), 180, 90); g.DrawLine(p, P(0.52f, 0.2f), P(0.86f, 0.2f));
                     break;
@@ -2538,8 +2588,8 @@ class Slider : Control
 
     int Step { get { return Max - Min > 100 ? 5 : 1; } }
 
-    protected override void OnMouseDown(MouseEventArgs e) { Focus(); drag = true; FromMouse(e.X); base.OnMouseDown(e); }
-    protected override void OnMouseMove(MouseEventArgs e) { if (drag) FromMouse(e.X); base.OnMouseMove(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { Focus(); if (!OnNumber(e.X)) { drag = true; FromMouse(e.X); } base.OnMouseDown(e); }
+    protected override void OnMouseMove(MouseEventArgs e) { if (drag) FromMouse(e.X); else Cursor = OnNumber(e.X) ? Cursors.IBeam : Cursors.Hand; base.OnMouseMove(e); }
     protected override void OnMouseUp(MouseEventArgs e) { drag = false; base.OnMouseUp(e); }
     protected override void OnMouseWheel(MouseEventArgs e)
     {
@@ -2553,6 +2603,52 @@ class Slider : Control
         else if (e.KeyCode == Keys.Right) Set(Value + Step);
         base.OnKeyDown(e);
     }
+    // Double-click the number, press Enter or just start typing to enter an exact value
+    TextBox edit;
+    bool OnNumber(int x) { return x > Track.Right + UI.I(4); }
+
+    void BeginEdit(string seed)
+    {
+        if (edit != null) return;
+        edit = new TextBox { BorderStyle = BorderStyle.FixedSingle, TextAlign = HorizontalAlignment.Right, Font = UI.F(11f), BackColor = Color.FromArgb(36, 40, 56), ForeColor = UI.Text, Width = UI.I(60) };
+        edit.Location = new Point(Width - edit.Width - 1, (Height - edit.Height) / 2);
+        edit.Text = seed ?? Value.ToString();
+        edit.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; EndEdit(e.KeyCode == Keys.Enter); Focus(); }
+            else if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
+            {
+                e.SuppressKeyPress = true;
+                int cur; if (!int.TryParse(edit.Text.Trim(), out cur)) cur = Value;
+                edit.Text = Math.Max(Min, Math.Min(Max, cur + (e.KeyCode == Keys.Up ? 1 : -1))).ToString();
+                edit.SelectionStart = edit.Text.Length;
+            }
+        };
+        edit.LostFocus += (s, e) => EndEdit(true);
+        Controls.Add(edit);
+        edit.Focus();
+        if (seed == null) edit.SelectAll(); else edit.SelectionStart = edit.Text.Length;
+    }
+
+    void EndEdit(bool commit)
+    {
+        if (edit == null) return;
+        var t = edit; edit = null;
+        var digits = new StringBuilder();
+        foreach (char ch in t.Text) if (char.IsDigit(ch) || (ch == '-' && digits.Length == 0)) digits.Append(ch);
+        int v;
+        if (commit && int.TryParse(digits.ToString(), out v)) Set(v);
+        Controls.Remove(t); t.Dispose(); Invalidate();
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e) { if (OnNumber(e.X)) BeginEdit(null); base.OnMouseDoubleClick(e); }
+    protected override void OnKeyPress(KeyPressEventArgs e)
+    {
+        if (char.IsDigit(e.KeyChar) || e.KeyChar == '-') { e.Handled = true; BeginEdit(e.KeyChar.ToString()); }
+        else if (e.KeyChar == (char)13) { e.Handled = true; BeginEdit(null); }
+        base.OnKeyPress(e);
+    }
+
     protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
     protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
 
@@ -3069,7 +3165,7 @@ class SettingsForm : Form
     {
         Desc("What the list under the month shows.");
         Section("Days");
-        Slide("calendar", "Days to show", "Today and the days after it", 1, 31, c.Days, v => v == 1 ? "Today" : v + " days", v => c.Days = v, true);
+        Slide("calendar", "Days to show", "Today and the days after it", 1, 120, c.Days, v => v == 1 ? "Today" : v + " days", v => c.Days = v, true);
         Switch("layers", "Merge duplicates", "An event in two calendars shows once", c.MergeDupes, v => c.MergeDupes = v, true);
         Switch("eye", "Show days with nothing on", "Otherwise only days with events get a heading", c.ShowEmptyDays, v => c.ShowEmptyDays = v);
         Slide("list", "Events per day", "The rest are summed up as \"+3 more\"", 0, 20, c.MaxPerDay, v => v == 0 ? "All" : v.ToString(), v => c.MaxPerDay = v);
@@ -3113,6 +3209,7 @@ class SettingsForm : Form
         Choice("text", "Font", null, fonts.ToArray(), Math.Max(0, fonts.IndexOf(c.FontName)), i => c.FontName = i == 0 ? "" : fonts[i]);
         Slide("size", "Size", null, 70, 200, c.Scale, v => v + "%", v => c.Scale = v);
         Slide("width", "Width", null, 220, 700, c.Width, v => v + " px", v => c.Width = v);
+        Slide("height", "Maximum height", "Taller agendas scroll: wheel or drag the bar", 0, 1400, c.MaxHeight, v => v < 200 ? "Fit screen" : v + " px", v => c.MaxHeight = v < 200 ? 0 : v);
         Slide("opacity", "Background opacity", null, 0, 100, c.Opacity, v => v + "%", v => c.Opacity = v);
         Slide("round", "Corner roundness", null, 0, 200, c.Round, v => v + "%", v => c.Round = v);
         Switch("shadow", "Shadow", null, c.Shadow, v => c.Shadow = v);
