@@ -1296,7 +1296,7 @@ class CalApp : ApplicationContext
     {
         ArmMinute();
         if (locked) return;
-        if (DateTime.Today != shownDay) { shownDay = DateTime.Today; Rebuild(); Sync(); }
+        if (DateTime.Today != shownDay) { shownDay = DateTime.Today; Widget.P.Selected = null; Rebuild(); Sync(); }
         else Widget.Render(false);
         Widget.Shimmer();
     }
@@ -1439,7 +1439,8 @@ class Painter : IDisposable
         public int Kind; // 0 event, 1 day heading, 2 date title, 3 month grid, 4 note, 5 clock title, 6 week strip
         public string Label, Value, Sub, Extra;
         public CalEvent Ev;
-        public bool Dim, Now, Soon, Warn, Today;
+        public bool Dim, Now, Soon, Warn, Today, Picked;
+        public DateTime Day;
         public double Frac;
         public float H;
     }
@@ -1451,6 +1452,8 @@ class Painter : IDisposable
     public List<CalEvent> Events = new List<CalEvent>();
     Dictionary<DateTime, List<Color>> dayColors = new Dictionary<DateTime, List<Color>>();
     public readonly List<Hit> Hits = new List<Hit>();
+    public readonly List<KeyValuePair<RectangleF, DateTime>> DayHits = new List<KeyValuePair<RectangleF, DateTime>>();
+    public DateTime? Selected, HoverDay; // a day clicked in the month or week view, and the one under the mouse
     readonly SolidBrush brush = new SolidBrush(Color.White);
     readonly List<Row> head = new List<Row>(), body = new List<Row>();
     Font fLabel, fValue, fHead, fSmall, fTitle, fClock, fClockSub, fDay, fDayBold;
@@ -1604,24 +1607,44 @@ class Painter : IDisposable
             return;
         }
 
+        int days = Math.Max(1, c.Days);
+        if (Selected.HasValue && (Selected.Value < today || Selected.Value >= today.AddDays(days)))
+            AddDay(Selected.Value, today, now, true); // a day clicked outside the agenda's range goes on top
         bool anyLater = false;
-        for (int d = 0; d < Math.Max(1, c.Days); d++)
-        {
-            var day = today.AddDays(d);
-            var next = day.AddDays(1);
-            var list = Events.Where(e => e.Start < next && (e.End > day || (e.End == e.Start && e.Start >= day)))
-                             .Where(e => c.ShowAllDay || !e.AllDay)
-                             .Where(e => d > 0 || c.ShowPast || e.AllDay || e.End > now || (e.End == e.Start && e.Start >= now))
-                             .OrderBy(e => e.AllDay ? 0 : 1).ThenBy(e => e.Start < day ? day : e.Start).ThenBy(e => e.Title).ToList();
-            if (list.Count == 0 && d > 0 && !c.ShowEmptyDays) continue;
-            if (d > 0) anyLater = true;
-            body.Add(new Row { Kind = 1, Today = d == 0, Label = (d == 0 ? "Today" : d == 1 ? "Tomorrow" : day.ToString("dddd")).ToUpper(), Sub = day.ToString("d MMM") });
-            if (list.Count == 0) body.Add(new Row { Kind = 4, Label = d == 0 ? "Nothing else today" : "Nothing on" });
-            int shown = c.MaxPerDay > 0 ? Math.Min(c.MaxPerDay, list.Count) : list.Count;
-            for (int i = 0; i < shown; i++) body.Add(EventRow(list[i], day, next, now));
-            if (shown < list.Count) body.Add(new Row { Kind = 4, Label = "+" + (list.Count - shown) + " more" });
-        }
+        for (int d = 0; d < days; d++)
+            if (AddDay(today.AddDays(d), today, now, false) && d > 0) anyLater = true;
         if (!anyLater && c.Days > 1) body.Add(new Row { Kind = 4, Label = "Nothing in the next " + (c.Days - 1) + " days" });
+    }
+
+    bool AddDay(DateTime day, DateTime today, DateTime now, bool extra)
+    {
+        var next = day.AddDays(1);
+        bool picked = Selected.HasValue && Selected.Value == day;
+        var list = Events.Where(e => e.Start < next && (e.End > day || (e.End == e.Start && e.Start >= day)))
+                         .Where(e => c.ShowAllDay || !e.AllDay)
+                         .Where(e => day != today || c.ShowPast || e.AllDay || e.End > now || (e.End == e.Start && e.Start >= now))
+                         .OrderBy(e => e.AllDay ? 0 : 1).ThenBy(e => e.Start < day ? day : e.Start).ThenBy(e => e.Title).ToList();
+        if (list.Count == 0 && day != today && !c.ShowEmptyDays && !picked) return false;
+        int d = (day - today).Days;
+        var label = d == 0 ? "Today" : d == 1 ? "Tomorrow" : d == -1 ? "Yesterday" : day.ToString("dddd");
+        body.Add(new Row { Kind = 1, Today = d == 0, Picked = picked, Day = day, Label = label.ToUpper(), Sub = extra || d < 0 || d > 6 ? day.ToString("ddd d MMM") : day.ToString("d MMM") });
+        if (list.Count == 0) body.Add(new Row { Kind = 4, Label = d == 0 ? "Nothing else today" : "Nothing on" });
+        int shown = c.MaxPerDay > 0 && !picked ? Math.Min(c.MaxPerDay, list.Count) : list.Count;
+        for (int i = 0; i < shown; i++) body.Add(EventRow(list[i], day, next, now));
+        if (shown < list.Count) body.Add(new Row { Kind = 4, Label = "+" + (list.Count - shown) + " more" });
+        return true;
+    }
+
+    // Where a day's heading sits in the scrolling agenda, or -1.
+    public float OffsetOf(DateTime day)
+    {
+        float y = 0;
+        foreach (var r in body)
+        {
+            if (r.Kind == 1 && r.Day == day) return y;
+            y += r.H;
+        }
+        return -1;
     }
 
     Row EventRow(CalEvent e, DateTime day, DateTime next, DateTime now)
@@ -1688,7 +1711,7 @@ class Painter : IDisposable
         WinH = (int)CardH + Margin * 2;
 
         var sb = new StringBuilder();
-        sb.Append(c.Rev).Append('|').Append(WinW).Append('x').Append(WinH).Append('|').Append(Th.Name);
+        sb.Append(c.Rev).Append('|').Append(WinW).Append('x').Append(WinH).Append('|').Append(Th.Name).Append('|').Append(Selected).Append('|').Append(HoverDay);
         foreach (var r in head.Concat(body))
             sb.Append('|').Append(r.Kind).Append(r.Label).Append(r.Value).Append(r.Sub).Append(r.Extra).Append(r.Dim).Append(r.Now ? r.Frac.ToString("0.00") : "");
         Key = sb.ToString();
@@ -1703,6 +1726,7 @@ class Painter : IDisposable
         target.SmoothingMode = SmoothingMode.AntiAlias;
         target.PixelOffsetMode = PixelOffsetMode.HighQuality;
         Hits.Clear();
+        DayHits.Clear();
 
         int alpha = (int)Math.Round(c.Opacity * 2.55);
         float cardH = DrawCardH > 0 ? DrawCardH : CardH;
@@ -1798,7 +1822,7 @@ class Painter : IDisposable
             {
                 float ty = y + it.H - 16 * U;
                 var hsz = g.MeasureString(it.Label, fHead, PointF.Empty, Typo);
-                brush.Color = it.Today ? Th.Accent : Th.Sub;
+                brush.Color = it.Today || it.Picked ? Th.Accent : Th.Sub;
                 g.DrawString(it.Label, fHead, brush, x0, ty, Typo);
                 if (!string.IsNullOrEmpty(it.Sub))
                 {
@@ -1982,19 +2006,30 @@ class Painter : IDisposable
                 var day = start.AddDays(w * 7 + i);
                 float cx = x0 + wn + cw * (i + 0.5f), cy = top + rh * w + 9 * U;
                 bool isToday = day == today, inMonth = weekOnly || day.Month == today.Month;
-                if (isToday)
+                bool picked = Selected.HasValue && Selected.Value == day;
+                var cell = new RectangleF(cx - cw / 2 + 1 * U, cy - 10 * U, cw - 2 * U, rh - 1 * U);
+                DayHits.Add(new KeyValuePair<RectangleF, DateTime>(cell, day));
+                if (HoverDay.HasValue && HoverDay.Value == day && !isToday)
+                    Draw.Fill(g, cell, 6 * U, Color.FromArgb(Th.Light ? 14 : 20, Th.Text));
+                if (isToday || picked)
                 {
                     // Centre the circle on the digits as they're actually drawn: text layout pads the box by a
                     // font-dependent amount, so the box's centre isn't where the glyphs land.
+                    var font = isToday ? fDayBold : fDay;
                     float ccx = cx, ccy = cy;
                     using (var path = new GraphicsPath())
                     {
-                        path.AddString(day.Day.ToString(), fDayBold.FontFamily, (int)fDayBold.Style, fDayBold.Size, new RectangleF(cx - cw / 2, cy - 9 * U, cw, 18 * U), Center);
+                        path.AddString(day.Day.ToString(), font.FontFamily, (int)font.Style, font.Size, new RectangleF(cx - cw / 2, cy - 9 * U, cw, 18 * U), Center);
                         var gb = path.GetBounds();
                         if (gb.Width > 0) { ccx = gb.X + gb.Width / 2; ccy = gb.Y + gb.Height / 2; }
                     }
                     float rr = 10 * U * pop;
-                    if (rr > 0.5f) using (var b = new SolidBrush(Th.Accent)) g.FillEllipse(b, ccx - rr, ccy - rr, rr * 2, rr * 2);
+                    if (isToday && rr > 0.5f) using (var b = new SolidBrush(Th.Accent)) g.FillEllipse(b, ccx - rr, ccy - rr, rr * 2, rr * 2);
+                    if (picked) // the clicked day gets a ring
+                    {
+                        float pr = isToday ? 12 * U : 10 * U;
+                        using (var p = new Pen(Th.Accent, 1.6f * U)) g.DrawEllipse(p, ccx - pr, ccy - pr, pr * 2, pr * 2);
+                    }
                 }
                 bool accentLight = Th.Accent.GetBrightness() > 0.7f;
                 brush.Color = isToday ? (accentLight ? Color.FromArgb(20, 20, 24) : Color.White) : !inMonth ? Color.FromArgb(70, Th.Sub) : day < today ? Th.Sub : Th.Text;
@@ -2147,6 +2182,24 @@ class WidgetForm : Form
         return null;
     }
 
+    DateTime? DayAt(Point p)
+    {
+        foreach (var h in P.DayHits) if (h.Key.Contains(p)) return h.Value;
+        return null;
+    }
+
+    // Clicking a day in the month or week view jumps the agenda to it. A day outside the agenda's range
+    // gets its own section at the top. Clicking it again goes back.
+    void SelectDay(DateTime day)
+    {
+        P.Selected = P.Selected == day ? (DateTime?)null : day;
+        Render(true);
+        float off = P.Selected.HasValue ? P.OffsetOf(day) : 0;
+        scrollTarget = Math.Max(0, Math.Min(P.MaxScroll, off < 0 ? 0 : off));
+        if (!c.Animate) P.Scroll = scrollTarget;
+        Changed();
+    }
+
     protected override void OnMouseDown(MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Left && OnScrollbar(e.Location))
@@ -2196,13 +2249,16 @@ class WidgetForm : Form
         var ev = dragging && moved || OnScrollbar(e.Location) ? null : HitAt(e.Location);
         if (ev != null && ev != P.Hover) { P.Hover = ev; P.HoverA = c.Animate ? 0 : 1; hoverTarget = 1; Changed(); }
         else if (ev == null && hoverTarget > 0) { hoverTarget = 0; if (!c.Animate) P.HoverA = 0; Changed(); }
-        Cursor = dragging && moved ? Cursors.SizeAll : ev != null && c.ClickOpens && Feed.WebUrl(ev.Feed, DateTime.Today) != null ? Cursors.Hand : Cursors.Default;
+        var day = dragging && moved ? null : DayAt(e.Location);
+        if (day != P.HoverDay) { P.HoverDay = day; Frame(); }
+        Cursor = dragging && moved ? Cursors.SizeAll : day != null || (ev != null && c.ClickOpens && Feed.WebUrl(ev.Feed, DateTime.Today) != null) ? Cursors.Hand : Cursors.Default;
         base.OnMouseMove(e);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
         if (hoverTarget > 0) { hoverTarget = 0; if (!c.Animate) P.HoverA = 0; Changed(); }
+        if (P.HoverDay != null) { P.HoverDay = null; Frame(); }
         base.OnMouseLeave(e);
     }
 
@@ -2214,6 +2270,7 @@ class WidgetForm : Form
             bool wasDrag = dragging && moved;
             dragging = false;
             if (wasDrag) c.Save();
+            else if (DayAt(e.Location).HasValue) SelectDay(DayAt(e.Location).Value);
             else if (c.ClickOpens)
             {
                 var ev = HitAt(e.Location);
