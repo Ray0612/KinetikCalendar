@@ -1,5 +1,9 @@
 # Release notes
 
+## v1.1.1
+
+- Today's circle in the month view is now centred on the date in every font (it sat off-centre in fonts like Bahnschrift)
+
 ## v1.1.0: themes and a new Settings window
 
 - **Settings redesigned** in Kinetik's style: a sidebar, cards with switches and sliders, and a live preview of the widget
