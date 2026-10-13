@@ -1150,6 +1150,37 @@ sealed class DibSurface : IDisposable
     public void Dispose() { Free(); }
 }
 
+// A card's soft shadow: stacked, slightly larger translucent shapes. Those anti-aliased fills over the whole card cost
+// more than the rest of a frame put together, so they're drawn once into a bitmap and copied while nothing about them changes.
+sealed class ShadowCache : IDisposable
+{
+    Bitmap bmp; string key;
+
+    // Lays the shadow into the (cleared) w × h target. look sums up everything draw depends on.
+    public void Paint(Graphics target, int w, int h, string look, Action<Graphics> draw)
+    {
+        var k = w + "x" + h + "|" + look + "|" + (int)target.SmoothingMode + (int)target.PixelOffsetMode;
+        if (k != key || bmp == null)
+        {
+            if (bmp == null || bmp.Width != w || bmp.Height != h) { if (bmp != null) bmp.Dispose(); bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb); }
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = target.SmoothingMode; g.PixelOffsetMode = target.PixelOffsetMode;
+                draw(g);
+            }
+            key = k;
+        }
+        bmp.SetResolution(target.DpiX, target.DpiY); // so it's copied 1:1
+        var mode = target.CompositingMode;
+        target.CompositingMode = CompositingMode.SourceCopy;
+        target.DrawImageUnscaled(bmp, 0, 0);
+        target.CompositingMode = mode;
+    }
+
+    public void Dispose() { if (bmp != null) bmp.Dispose(); bmp = null; key = null; }
+}
+
 class DarkColors : ProfessionalColorTable
 {
     static readonly Color Bg = Color.FromArgb(27, 31, 44), Hi = Color.FromArgb(40, 47, 66), Edge = Color.FromArgb(52, 60, 82);
@@ -1233,7 +1264,9 @@ class CalApp : ApplicationContext
         Menu.Opening += (s, e) =>
         {
             lockItem.Checked = Cfg.Locked;
+            var old = open.DropDownItems.Cast<ToolStripItem>().ToList();
             open.DropDownItems.Clear();
+            foreach (var it in old) it.Dispose(); // a cleared item that was shown keeps its window otherwise
             foreach (var grp in Cfg.Feeds.Where(f => f.On && Feed.WebUrl(f, DateTime.Today) != null).GroupBy(f => Feed.WebUrl(f, DateTime.Today)))
             {
                 var f = grp.First();
@@ -1500,7 +1533,12 @@ class Painter : IDisposable
 
     public Painter(CalApp app) { this.app = app; }
 
-    public void Dispose() { DisposeFonts(); brush.Dispose(); if (layer != null) layer.Dispose(); }
+    // Set by the widget window, which fades a solid card itself; PushAlpha is then the opacity to show it at.
+    public bool WindowAlpha;
+    public int PushAlpha = 255;
+    readonly ShadowCache shadow = new ShadowCache();
+
+    public void Dispose() { DisposeFonts(); brush.Dispose(); if (layer != null) layer.Dispose(); shadow.Dispose(); }
 
     public void SetEvents(List<CalEvent> list)
     {
@@ -1744,23 +1782,35 @@ class Painter : IDisposable
         float cardH = DrawCardH > 0 ? DrawCardH : CardH;
         var card = new RectangleF(Margin, Margin, CardW, cardH);
         float rad = Math.Min(card.Height / 2, 12 * U * c.Round / 100f);
-        if (Margin > 1) // soft shadow: stacked, slightly larger translucent shapes
-            for (int k = 7; k >= 1; k--)
-            {
-                var r = card;
-                r.Inflate(k * 1.6f * U, k * 1.6f * U);
-                r.Offset(0, 2 * U);
-                Draw.Fill(target, r, rad + k * 1.6f * U, Color.FromArgb(Math.Max(1, 7 * alpha / 255), 0, 0, 0));
-            }
+        var size = target.VisibleClipBounds;
+        int lw = (int)Math.Ceiling(size.Width), lh = (int)Math.Ceiling(size.Height);
 
         // ClearType needs solid pixels behind the text. So for a mostly opaque card, the card is drawn solid with ClearType text
-        // on a layer, and the whole layer is then blended in at the card's opacity. A very see-through card keeps grayscale text.
-        bool crisp = alpha >= 150;
+        // and then faded to the card's opacity as a whole: by the widget window itself (PushAlpha, free), or else by blending
+        // a layer in (a few ms a frame). A very see-through card keeps grayscale text.
+        bool crisp = alpha >= 150, byWindow = crisp && WindowAlpha;
+        PushAlpha = byWindow ? alpha : 255;
+        int shadowA = byWindow ? 255 : alpha; // the window's fade then brings it to the same strength
+        if (Margin > 1) // soft shadow: stacked, slightly larger translucent shapes
+            shadow.Paint(target, lw, lh, card + "|" + rad + "|" + U + "|" + shadowA, sg =>
+            {
+                for (int k = 7; k >= 1; k--)
+                {
+                    var r = card;
+                    r.Inflate(k * 1.6f * U, k * 1.6f * U);
+                    r.Offset(0, 2 * U);
+                    Draw.Fill(sg, r, rad + k * 1.6f * U, Color.FromArgb(Math.Max(1, 7 * shadowA / 255), 0, 0, 0));
+                }
+            });
+
         Graphics g = target;
-        if (crisp)
+        if (byWindow)
         {
-            var size = target.VisibleClipBounds;
-            int lw = (int)Math.Ceiling(size.Width), lh = (int)Math.Ceiling(size.Height);
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            g.TextContrast = 2;
+        }
+        else if (crisp)
+        {
             if (layer == null || layer.Width != lw || layer.Height != lh) { if (layer != null) layer.Dispose(); layer = new Bitmap(lw, lh, PixelFormat.Format32bppPArgb); }
             g = Graphics.FromImage(layer);
             g.Clear(Color.Transparent);
@@ -1804,7 +1854,7 @@ class Painter : IDisposable
             Draw.Fill(g, new RectangleF(card.Right - 3 * U - w, ty, w, thumb), w / 2, Color.FromArgb(ThumbDrag ? 150 : 95, Th.Sub));
         }
         g.Restore(state);
-        if (crisp)
+        if (crisp && !byWindow)
         {
             g.Dispose();
             if (alpha >= 255) target.DrawImageUnscaled(layer, 0, 0);
@@ -2146,7 +2196,7 @@ class WidgetForm : Form
     public WidgetForm(CalApp app)
     {
         this.app = app; c = app.Cfg; Layer = c.Layer;
-        P = new Painter(app);
+        P = new Painter(app) { WindowAlpha = true };
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -2465,7 +2515,7 @@ class WidgetForm : Form
         EnsurePosition();
         var bmp = surface.Canvas(w, h);
         using (var g = Graphics.FromImage(bmp)) P.Paint(g);
-        byte alpha = (byte)(255 * Draw.Ease(P.Appear * 1.6f));
+        byte alpha = (byte)(P.PushAlpha * Draw.Ease(P.Appear * 1.6f));
         surface.Push(Handle, c.X, c.Y, alpha);
         if (!Visible || alpha > 0)
         {
