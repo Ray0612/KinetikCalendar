@@ -1,4 +1,4 @@
-﻿// Kinetik Calendar: a desktop agenda widget for Google, Outlook and Apple (iCloud) calendars, in the style of Kinetik's widget.
+// Kinetik Calendar: a desktop agenda widget for Google, Outlook and Apple (iCloud) calendars, in the style of Kinetik's widget.
 // Each calendar is read from its private iCal (.ics) link, so there's no sign-in, no API keys and nothing to install.
 // Copyright © 2026 Akila Sella Hennedige. GPL-3.0-or-later.
 using System;
@@ -46,8 +46,11 @@ static class Program
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             ToolStripManager.Renderer = new DarkMenu();
+            Backup.KeyName = "KinetikCalendar"; Backup.AppTitle = "Kinetik Calendar";
+            if (!Demo) Backup.OfferRestore();
             Application.Run(new CalApp(args.Contains("--settings")));
         }
+        Backup.AfterExit();
     }
 }
 
@@ -1241,6 +1244,7 @@ class CalApp : ApplicationContext
 
         tray.Icon = iconBytes != null ? new Icon(new MemoryStream(iconBytes), SystemInformation.SmallIconSize) : SystemIcons.Application;
         tray.Text = Program.Demo ? "Kinetik Calendar (demo)" : "Kinetik Calendar";
+        Backup.BeforeExit = () => tray.Visible = false;
         tray.ContextMenuStrip = Menu;
         tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) OpenSettings(null); };
         tray.Visible = true;
@@ -3443,6 +3447,11 @@ class SettingsForm : Form
         var t = new Toggle(Startup.IsOn);
         t.Changed += (s, e) => Startup.Set(t.Checked);
         Row("power", "Run at startup", "Starts with Windows", t);
+        Section("Backup");
+        Row("folder", "Back up settings", "Saves your calendars, look and layout next to the app. Last backup: " + Backup.SavedText,
+            UI.Btn("Back up", (s, e) => { c.Save(); Backup.SaveNow(); ShowPage(current); }));
+        Row("folder", "Restore settings", "Loads the backup from the app folder, for example after reinstalling Windows",
+            UI.Btn("Restore", (s, e) => Backup.RestoreNow()));
     }
 
     // ---- About
@@ -3657,5 +3666,111 @@ class FeedDialog : Form
         if (tested != null && testedUrl == link) { Result.Parsed = tested; Result.Status = "Synced " + DateTime.Now.ToString("t"); }
         DialogResult = DialogResult.OK;
         Close();
+    }
+}
+
+// ======================================================================= Settings backup
+// Copies the app's settings (HKCU\Software\<KeyName>) to "<KeyName>-settings.reg" next to the exe, so they survive a
+// Windows reinstall when the app folder is kept (on OneDrive, a USB stick…). It's a normal .reg export, so
+// double-clicking the file restores the settings as well. A restore runs after the app has closed, so nothing the app
+// saves on the way out can overwrite it, and then the app starts again with the restored settings.
+// Same code in every Kinetik app.
+static class Backup
+{
+    public static string KeyName, AppTitle;
+    public static Action BeforeExit; // e.g. hide the tray icon, as the app's own Exit does
+    static bool restoreAfterExit;
+
+    public static string FilePath
+    {
+        get { return System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Application.ExecutablePath), KeyName + "-settings.reg"); }
+    }
+    public static bool Exists { get { return System.IO.File.Exists(FilePath); } }
+    public static string SavedText
+    {
+        get { return Exists ? System.IO.File.GetLastWriteTime(FilePath).ToString("d MMM yyyy, h:mm tt") : "never"; }
+    }
+
+    static bool HasSettings
+    {
+        get
+        {
+            try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\" + KeyName)) return k != null; }
+            catch { return true; }
+        }
+    }
+
+    static bool Reg(string args)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(System.IO.Path.Combine(Environment.SystemDirectory, "reg.exe"), args)
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            using (var p = System.Diagnostics.Process.Start(psi))
+            {
+                p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd();
+                return p.WaitForExit(15000) && p.ExitCode == 0;
+            }
+        }
+        catch { return false; }
+    }
+
+    // A restore may only write this app's own key, so an edited or swapped file can't change anything else.
+    static bool FileIsOurs()
+    {
+        try
+        {
+            string own = "[HKEY_CURRENT_USER\\Software\\" + KeyName;
+            bool any = false;
+            foreach (var line in System.IO.File.ReadAllLines(FilePath))
+            {
+                var l = line.Trim();
+                if (!l.StartsWith("[")) continue;
+                if (!l.StartsWith(own + "]", StringComparison.OrdinalIgnoreCase) && !l.StartsWith(own + "\\", StringComparison.OrdinalIgnoreCase)) return false;
+                any = true;
+            }
+            return any;
+        }
+        catch { return false; }
+    }
+
+    static bool Import() { return FileIsOurs() && Reg("import \"" + FilePath + "\""); }
+
+    static void Say(string text, MessageBoxIcon icon) { MessageBox.Show(text, AppTitle, MessageBoxButtons.OK, icon); }
+
+    // At launch: no settings in the registry (a fresh Windows) but a backup beside the exe, so offer it.
+    public static void OfferRestore()
+    {
+        if (HasSettings || !Exists) return;
+        if (MessageBox.Show("There are saved " + AppTitle + " settings in this folder, from " + SavedText + ".\n\nRestore them?",
+                AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        if (!Import()) Say("Couldn't restore the settings from\n" + FilePath, MessageBoxIcon.Warning);
+    }
+
+    public static void SaveNow()
+    {
+        if (Reg("export \"HKCU\\Software\\" + KeyName + "\" \"" + FilePath + "\" /y"))
+            Say("Settings backed up to\n" + FilePath + "\n\nKeep this file with the app. After reinstalling Windows, " + AppTitle + " offers to restore it the first time it starts.", MessageBoxIcon.Information);
+        else
+            Say("Couldn't save the backup to\n" + FilePath + "\n\nCheck that the folder isn't read-only.", MessageBoxIcon.Warning);
+    }
+
+    public static void RestoreNow()
+    {
+        if (!Exists) { Say("There's no backup yet. Use \"Back up settings\" first.\n\nIt would be saved as\n" + FilePath, MessageBoxIcon.Information); return; }
+        if (!FileIsOurs()) { Say("The backup file isn't a " + AppTitle + " settings file, so it wasn't used.", MessageBoxIcon.Warning); return; }
+        if (MessageBox.Show("Replace the current settings with the backup from " + SavedText + "?\n\n" + AppTitle + " will restart.",
+                AppTitle, MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        restoreAfterExit = true;
+        if (BeforeExit != null) try { BeforeExit(); } catch { }
+        Application.Exit();
+    }
+
+    // Called from Main once the app has closed and released its single-instance lock.
+    public static void AfterExit()
+    {
+        if (!restoreAfterExit) return;
+        if (!Import()) Say("Couldn't restore the settings from\n" + FilePath, MessageBoxIcon.Warning);
+        try { System.Diagnostics.Process.Start(Application.ExecutablePath); } catch { }
     }
 }
