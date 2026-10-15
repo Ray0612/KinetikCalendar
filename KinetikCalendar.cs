@@ -24,11 +24,11 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Calendar")]
 [assembly: AssemblyProduct("Kinetik Calendar")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
 
 static class Program
 {
-    public const string Version = "1.1.1";
+    public const string Version = "1.1.2";
     public static bool Demo; // --demo: made-up calendars, nothing read from or saved to this PC
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
 
@@ -179,9 +179,40 @@ class Settings
         try { var v = k.GetValue(n); return v == null ? d : Convert.ToInt32(v); } catch { return d; }
     }
 
+    // Set when the saved settings exist but couldn't be read. The app then runs on defaults, and Save does nothing,
+    // so those defaults can never overwrite the real settings. Restarting the app tries again.
+    public static bool Unreadable;
+    static bool warned;
+
+    // Reads the settings, retrying a few times: the key can be briefly unreadable, e.g. while a backup is being
+    // restored into it or OneDrive/another program has it busy.
     public static Settings Load()
     {
         if (Program.Demo) return DemoData.Settings();
+        Settings s = null;
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            if (attempt > 0) Thread.Sleep(500);
+            bool ok;
+            s = TryLoad(out ok);
+            if (ok) { Unreadable = false; return s; }
+        }
+        Unreadable = true;
+        if (!warned)
+        {
+            warned = true;
+            MessageBox.Show("Kinetik Calendar couldn't read its saved settings, so it's showing the defaults for now.\n\n" +
+                "Your settings haven't been changed, and nothing will be saved over them while this is showing. " +
+                "Restart Kinetik Calendar to try again" + (Backup.Exists ? ", or use Settings → Behaviour → Restore." : "."),
+                "Kinetik Calendar", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        return s;
+    }
+
+    // ok is false when the settings are there but something in them couldn't be read (a missing key is fine: first run).
+    static Settings TryLoad(out bool ok)
+    {
+        ok = true;
         var s = new Settings();
         try
         {
@@ -209,24 +240,31 @@ class Settings
                 using (var fk = k.OpenSubKey("Feeds"))
                     if (fk != null)
                         foreach (var n in fk.GetSubKeyNames().OrderBy(n => { int v; return int.TryParse(n, out v) ? v : 999; }))
-                            using (var f = fk.OpenSubKey(n))
+                        {
+                            // each calendar on its own: one that can't be read doesn't lose the others
+                            try
                             {
-                                var kind = (string)f.GetValue("Kind", "Other");
-                                s.Feeds.Add(new Feed
+                                using (var f = fk.OpenSubKey(n))
                                 {
-                                    Name = (string)f.GetValue("Name", ""), Url = (string)f.GetValue("Url", ""), Kind = kind,
-                                    Color = Color.FromArgb(255, Color.FromArgb(I(f, "Color", Feed.DefaultColor(kind).ToArgb()))), On = I(f, "On", 1) != 0
-                                });
+                                    var kind = Convert.ToString(f.GetValue("Kind", "Other"));
+                                    s.Feeds.Add(new Feed
+                                    {
+                                        Name = Convert.ToString(f.GetValue("Name", "")), Url = Convert.ToString(f.GetValue("Url", "")), Kind = kind,
+                                        Color = Color.FromArgb(255, Color.FromArgb(I(f, "Color", Feed.DefaultColor(kind).ToArgb()))), On = I(f, "On", 1) != 0
+                                    });
+                                }
                             }
+                            catch { ok = false; } // keep going, but don't let a save drop the calendar that couldn't be read
+                        }
             }
         }
-        catch { }
+        catch { ok = false; }
         return s;
     }
 
     public void Save()
     {
-        if (Program.Demo) return;
+        if (Program.Demo || Unreadable) return; // never save defaults over settings that couldn't be read
         try
         {
             using (var k = Registry.CurrentUser.CreateSubKey(KeyPath))

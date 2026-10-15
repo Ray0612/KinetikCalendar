@@ -1,5 +1,14 @@
 # Release notes
 
+## v1.1.2
+
+- **Click a day** in the month or week view to jump to its events
+- **Move between months** (or weeks) with the arrows, the mouse wheel and a **Today** button
+- **Back up and restore settings:** Settings → Behaviour → Backup saves `KinetikCalendar-settings.reg` next to the exe; on a fresh Windows with no settings, the app offers to restore it
+- **Safer settings loading:** if the saved settings can't be read (for example while OneDrive or a restore has them busy), the app retries, then runs on defaults without ever saving over your real settings. One unreadable calendar no longer loses the others
+- **Faster animation:** the sync spinner, shimmer and scrolling draw a frame in about 1.7 ms instead of 11 ms
+- Fixed: the "Open calendar" submenu leaked a window each time the menu opened
+
 ## v1.1.1
 
 - Today's circle in the month view is now centred on the date in every font (it sat off-centre in fonts like Bahnschrift)
