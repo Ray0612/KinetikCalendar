@@ -24,11 +24,11 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Calendar")]
 [assembly: AssemblyProduct("Kinetik Calendar")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.1.3.0")]
+[assembly: AssemblyVersion("1.1.4.0")]
 
 static class Program
 {
-    public const string Version = "1.1.3";
+    public const string Version = "1.1.4";
     public static bool Demo; // --demo: made-up calendars, nothing read from or saved to this PC
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
 
@@ -48,7 +48,9 @@ static class Program
             ToolStripManager.Renderer = new DarkMenu();
             Backup.KeyName = "KinetikCalendar"; Backup.AppTitle = "Kinetik Calendar";
             if (!Demo) Backup.OfferRestore();
-            Application.Run(new CalApp(args.Contains("--settings")));
+            var app = new CalApp(args.Contains("--settings"));
+            using (new KinetikSuite.Shutdown("KinetikCalendar" + (Demo ? "Demo" : ""), app.Quit))
+                Application.Run(app);
         }
         Backup.AfterExit();
     }
@@ -59,7 +61,9 @@ static class Mem
 {
     [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr p, IntPtr min, IntPtr max);
 
-    public static void Trim()
+    public static void Trim() { KinetikSuite.MemoryPolicy.Measure("KinetikCalendar", TrimCore); }
+
+    static void TrimCore()
     {
         try
         {
@@ -218,7 +222,7 @@ class Settings
         {
             using (var k = Registry.CurrentUser.OpenSubKey(KeyPath))
             {
-                if (k == null) return s;
+                if (k == null) { KinetikSuite.SettingsValidation.Sanitize(s); return s; }
                 foreach (var f in Fields)
                 {
                     var v = k.GetValue(f.Name);
@@ -229,7 +233,7 @@ class Settings
                         else if (f.FieldType == typeof(int)) f.SetValue(s, Convert.ToInt32(v));
                         else f.SetValue(s, Convert.ToInt32(v) != 0);
                     }
-                    catch { }
+                    catch { ok = false; }
                 }
                 // Settings from v1.0
                 if (k.GetValue("MonthStyle") == null && I(k, "ShowMonth", 1) == 0) s.MonthStyle = 2;
@@ -259,12 +263,14 @@ class Settings
             }
         }
         catch { ok = false; }
-        return s;
+        KinetikSuite.SettingsValidation.Sanitize(s); return s;
     }
 
     public void Save()
     {
-        if (Program.Demo || Unreadable) return; // never save defaults over settings that couldn't be read
+        if (Program.Demo || Unreadable) return;
+        KinetikSuite.SettingsValidation.Sanitize(this);
+        if (KinetikSuite.RegistryFiles.CannotSave) return; // never save defaults over settings that couldn't be read
         try
         {
             using (var k = Registry.CurrentUser.CreateSubKey(KeyPath))
@@ -917,7 +923,7 @@ static class Ics
                     periodStart = d0.AddDays((double)k * interval);
                     if ((byMonth.Count == 0 || byMonth.Contains(periodStart.Month)) &&
                         (byDay.Count == 0 || byDay.Any(b => b.Value == periodStart.DayOfWeek)) &&
-                        (byMonthDay.Count == 0 || byMonthDay.Contains(periodStart.Day))) c.Add(periodStart);
+                        (byMonthDay.Count == 0 || byMonthDay.Any(md => (md > 0 ? md : DateTime.DaysInMonth(periodStart.Year, periodStart.Month) + md + 1) == periodStart.Day))) c.Add(periodStart);
                     break;
                 case "WEEKLY":
                     periodStart = d0.AddDays(-(((int)d0.DayOfWeek - (int)wkst + 7) % 7)).AddDays(7.0 * k * interval);
@@ -1260,7 +1266,7 @@ class CalApp : ApplicationContext
 {
     public readonly Settings Cfg = Settings.Load();
     public WidgetForm Widget;
-    public readonly ContextMenuStrip Menu = new ContextMenuStrip();
+    public readonly ContextMenuStrip Menu = KinetikSuite.MenuFocus.Attach(new ContextMenuStrip());
     public readonly Icon AppIcon;
     readonly NotifyIcon tray = new NotifyIcon();
     readonly Control ui = new Control(); // marshals background syncs back to the UI thread
@@ -1516,7 +1522,7 @@ class CalApp : ApplicationContext
         try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
     }
 
-    void Quit()
+    public void Quit()
     {
         SystemEvents.PowerModeChanged -= OnPower;
         SystemEvents.DisplaySettingsChanged -= OnDisplay;
@@ -3805,22 +3811,8 @@ static class Backup
         }
     }
 
-    static bool Reg(string args)
-    {
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo(System.IO.Path.Combine(Environment.SystemDirectory, "reg.exe"), args)
-            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            using (var p = System.Diagnostics.Process.Start(psi))
-            {
-                p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd();
-                return p.WaitForExit(15000) && p.ExitCode == 0;
-            }
-        }
-        catch { return false; }
-    }
+    static bool Reg(string args) { return KinetikSuite.RegistryFiles.Run(args); }
 
-    // A restore may only write this app's own key, so an edited or swapped file can't change anything else.
     static bool FileIsOurs()
     {
         try
@@ -3839,7 +3831,11 @@ static class Backup
         catch { return false; }
     }
 
-    static bool Import() { return FileIsOurs() && Reg("import \"" + FilePath + "\""); }
+    static bool Import()
+    {
+        try { return FileIsOurs() && KinetikSuite.RegistryFiles.Replace(FilePath, new[] { KeyName }); }
+        catch (Exception ex) { Say(ex.Message, MessageBoxIcon.Warning); return false; }
+    }
 
     static void Say(string text, MessageBoxIcon icon) { MessageBox.Show(text, AppTitle, MessageBoxButtons.OK, icon); }
 
