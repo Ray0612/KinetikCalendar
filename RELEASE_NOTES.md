@@ -1,5 +1,18 @@
 # Release notes
 
+## v1.1.4
+
+Fixes and the shared Kinetik menu.
+
+- **Same right-click menu as the other Kinetik apps:** Theme, Size, Font, Background opacity, Placement (with lock, click-through and snapping), Settings, Run at startup and Backup, in the same order and words everywhere
+- **Default background opacity is now 95%** (was 92%); if yours was at the old default, it moves with it
+- **Right-click menus close when you click elsewhere,** the desktop included. They used to stay open
+- **Fixed: monthly events on a day counted from the end of the month** (for example "the last day") in daily-repeat rules
+- **Restoring settings** replaces only the calendar's own settings, instead of merging old calendar entries back in
+- **Closes cleanly when Kinetik Hub asks it to,** so Hub can restart and update it without force-closing it
+- **Safer settings:** out-of-range values are backed up and corrected when the app starts, and settings that can't be read are never saved over
+- `build.bat` keeps the exe it replaces in `..\Old Versions`, and `build.bat package` checks every file in the release zip against its SHA-256 hash
+
 ## v1.1.2
 
 - **Click a day** in the month or week view to jump to its events

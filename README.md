@@ -13,7 +13,7 @@ There's no sign-in and no API key. Each calendar is read from its private iCal (
 
 > **About this project:** I made this for my own desktop and decided to share it in case anyone else finds it useful. If you run into a bug or have an idea for a feature, please [open an issue](../../issues).
 
-**Latest version: v1.1.2.** [Download it from Releases](../../releases/latest).
+**Latest version: v1.1.4.** [Download it from Releases](../../releases/latest).
 
 ## Contents
 
@@ -174,12 +174,12 @@ This produces `KinetikCalendar.exe` with the app icon embedded (`make-icon.ps1` 
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## Tests and packaging
+
+`python tests/run-tests.py` runs the regression checks (no window opens). `build.bat package` builds the exe and makes the release zip, checking every file in it against its SHA-256 hash. The shared support code (`SuiteSupport.cs`) is compiled into the exe, so there's no extra DLL.
+
 ## License
 
 Copyright © 2026 Akila Sella Hennedige.
 
 Released under the [GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later). You're free to use, study, modify and share it, including commercially, as long as anything you distribute that's based on it is also released under the GPL with its source code available.
-
-## Local maintenance build 1.1.4
-
-Includes the approved 16 October 2026 diagnostics fixes. Cross-compilation and regression results are recorded in the Apps diagnostics report; Windows GUI and hardware validation remains pending. Run `python tests/run-tests.py` for non-GUI regressions, and `build.bat package` to compile and create a hash-verified release package. Shared support is compiled into the EXE; no additional runtime DLL is required.
