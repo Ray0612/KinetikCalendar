@@ -24,11 +24,11 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Calendar")]
 [assembly: AssemblyProduct("Kinetik Calendar")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyVersion("1.1.3.0")]
 
 static class Program
 {
-    public const string Version = "1.1.2";
+    public const string Version = "1.1.3";
     public static bool Demo; // --demo: made-up calendars, nothing read from or saved to this PC
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
 
@@ -138,7 +138,7 @@ class Feed
 class Settings
 {
     const string KeyPath = @"Software\KinetikCalendar";
-    public int X = int.MinValue, Y = int.MinValue, Width = 320, Scale = 100, Opacity = 92, Round = 100, Days = 7, Layer = 0, SyncMin = 15, MaxHeight = 0; // MaxHeight 0 = as tall as the screen allows
+    public int X = int.MinValue, Y = int.MinValue, Width = 320, Scale = 100, Opacity = CommonMenu.DefaultOpacity, Round = 100, Days = 7, Layer = 0, SyncMin = 15, MaxHeight = 0; // MaxHeight 0 = as tall as the screen allows
     public bool Locked, Snap = true, Shadow = true, Border = true, ClickThrough, Animate = true, ClickOpens = true;
     public string ThemeName = "Midnight", FontName = "";
     public int Accent, BgColor; // ARGB; 0 means the theme's own
@@ -195,7 +195,7 @@ class Settings
             if (attempt > 0) Thread.Sleep(500);
             bool ok;
             s = TryLoad(out ok);
-            if (ok) { Unreadable = false; return s; }
+            if (ok) { Unreadable = false; s.Opacity = CommonMenu.Migrate(s.Opacity); return s; }
         }
         Unreadable = true;
         if (!warned)
@@ -1287,31 +1287,7 @@ class CalApp : ApplicationContext
         catch { }
         AppIcon = iconBytes != null ? new Icon(new MemoryStream(iconBytes)) : SystemIcons.Application;
 
-        var open = new ToolStripMenuItem("Open calendar");
-        open.DropDownItems.Add("(none)");
-        var lockItem = new ToolStripMenuItem("Lock position");
-        lockItem.Click += (s, e) => { Cfg.Locked = !Cfg.Locked; Apply(false); };
-        Menu.Items.Add("Sync now", null, (s, e) => Sync());
-        Menu.Items.Add(open);
-        Menu.Items.Add(new ToolStripSeparator());
-        Menu.Items.Add("Settings…", null, (s, e) => OpenSettings(null));
-        Menu.Items.Add("Themes…", null, (s, e) => OpenSettings("Look"));
-        Menu.Items.Add(lockItem);
-        Menu.Items.Add(new ToolStripSeparator());
-        Menu.Items.Add("Exit", null, (s, e) => Quit());
-        Menu.Opening += (s, e) =>
-        {
-            lockItem.Checked = Cfg.Locked;
-            var old = open.DropDownItems.Cast<ToolStripItem>().ToList();
-            open.DropDownItems.Clear();
-            foreach (var it in old) it.Dispose(); // a cleared item that was shown keeps its window otherwise
-            foreach (var grp in Cfg.Feeds.Where(f => f.On && Feed.WebUrl(f, DateTime.Today) != null).GroupBy(f => Feed.WebUrl(f, DateTime.Today)))
-            {
-                var f = grp.First();
-                open.DropDownItems.Add(Feed.KindTitle(f.Kind), null, (s2, e2) => OpenWeb(f, DateTime.Today));
-            }
-            open.Enabled = open.DropDownItems.Count > 0;
-        };
+        Menu.Opening += (s, e) => BuildMenu();
 
         tray.Icon = iconBytes != null ? new Icon(new MemoryStream(iconBytes), SystemInformation.SmallIconSize) : SystemIcons.Application;
         tray.Text = Program.Demo ? "Kinetik Calendar (demo)" : "Kinetik Calendar";
@@ -1451,6 +1427,47 @@ class CalApp : ApplicationContext
     }
 
     // Called by Settings after any change. `rebuild` when it affects which events are on show.
+    void BuildMenu()
+    {
+        var old = Menu.Items.Cast<ToolStripItem>().ToList();
+        Menu.Items.Clear();
+        foreach (var it in old) it.Dispose(); // a cleared item that was shown keeps its window otherwise
+        Menu.Items.Add("Sync now", null, (s, e) => Sync());
+        var open = new ToolStripMenuItem("Open calendar");
+        foreach (var grp in Cfg.Feeds.Where(f => f.On && Feed.WebUrl(f, DateTime.Today) != null).GroupBy(f => Feed.WebUrl(f, DateTime.Today)))
+        {
+            var f = grp.First();
+            open.DropDownItems.Add(Feed.KindTitle(f.Kind), null, (s2, e2) => OpenWeb(f, DateTime.Today));
+        }
+        if (open.DropDownItems.Count == 0) { open.DropDownItems.Add("(none)"); open.Enabled = false; }
+        Menu.Items.Add(open);
+        Menu.Items.Add(new ToolStripSeparator());
+        Common().AddAll(Menu.Items);
+    }
+
+    // The look, placement, startup and backup options, shared word for word with the other Kinetik apps.
+    CommonMenu Common()
+    {
+        return new CommonMenu
+        {
+            Title = "Kinetik Calendar", Version = Program.Version,
+            OpenTheme = () => OpenSettings("Look"),
+            Scale = () => Cfg.Scale, SetScale = v => { Cfg.Scale = v; Apply(true); },
+            Widths = new[] { 280, 320, 400 }, CardWidth = () => Cfg.Width, SetCardWidth = v => { Cfg.Width = v; Apply(true); },
+            FontName = () => Cfg.FontName, SetFontName = v => { Cfg.FontName = v; Apply(true); },
+            Opacity = () => Cfg.Opacity, SetOpacity = v => { Cfg.Opacity = v; Apply(false); },
+            Layer = () => Cfg.Layer, SetLayer = v => { Cfg.Layer = v; Cfg.Save(); RecreateWidget(); },
+            Locked = () => Cfg.Locked, SetLocked = v => { Cfg.Locked = v; Apply(false); },
+            ClickThrough = () => Cfg.ClickThrough, SetClickThrough = v => { Cfg.ClickThrough = v; Apply(false); },
+            Snap = () => Cfg.Snap, SetSnap = v => { Cfg.Snap = v; Apply(false); },
+            OpenSettings = () => OpenSettings(null),
+            RunAtStartup = () => Startup.IsOn, SetRunAtStartup = Startup.Set,
+            Restore = Backup.RestoreNow, LastBackup = () => Backup.SavedText,
+            BackUp = () => { Cfg.Save(); Backup.SaveNow(); },
+            Exit = Quit,
+        };
+    }
+
     public void Apply(bool rebuild)
     {
         Cfg.Rev++;
@@ -3862,3 +3879,107 @@ static class Backup
         try { System.Diagnostics.Process.Start(Application.ExecutablePath); } catch { }
     }
 }
+
+// ======================================================================= The right-click menu every Kinetik widget shares
+// The look, placement, startup and backup options, in the same order and the same words in every Kinetik app, so they
+// feel like one set. Each app adds its own items above. Same code in every Kinetik app.
+#pragma warning disable 0649 // the hooks an app has no use for stay null
+class CommonMenu
+{
+    public static readonly int[] Scales = { 80, 90, 100, 115, 125, 150 };
+    public static readonly int[] Opacities = { 100, 95, 80, 65, 50, 30, 0 };
+    public const int DefaultOpacity = 95;
+    public static readonly string[] Fonts = { "Segoe UI Variable Text", "Segoe UI", "Bahnschrift", "Calibri", "Aptos", "Inter", "Cascadia Code", "Consolas", "Verdana", "Georgia" };
+
+    // Settings saved before the shared default changed from 92% to 95% move with it; any other choice is kept.
+    public static int Migrate(int opacity) { return opacity == 92 ? DefaultOpacity : opacity; }
+
+    public string Title, Version;
+    public Action OpenTheme;                                        // opens the theme picker (or the page with it)
+    public Func<int> Scale; public Action<int> SetScale;
+    public int[] Widths; public Func<int> CardWidth; public Action<int> SetCardWidth; // optional: Narrow, Normal, Wide
+    public Func<string> FontName; public Action<string> SetFontName;   // optional; "" = the default font
+    public Func<int> Opacity; public Action<int> SetOpacity;
+    public Func<int> Layer; public Action<int> SetLayer;
+    public Func<bool> Locked; public Action<bool> SetLocked;
+    public Func<bool> ClickThrough; public Action<bool> SetClickThrough; // optional
+    public Func<bool> Snap; public Action<bool> SetSnap;
+    public string LockText = "Lock position";
+    public Action OpenSettings;                                     // optional: the app's Settings window
+    public Func<bool> RunAtStartup; public Action<bool> SetRunAtStartup;   // optional
+    public Action BackUp, Restore; public Func<string> LastBackup; // optional
+    public Action Exit;                                         // optional
+
+    static ToolStripMenuItem Item(string text, bool check, Action click)
+    {
+        var it = new ToolStripMenuItem(text) { Checked = check };
+        it.Click += (s, e) => click();
+        return it;
+    }
+
+    static bool HasFont(string name)
+    {
+        try { using (var f = new FontFamily(name)) return f.Name == name; } catch { return false; }
+    }
+
+    // Appearance and placement: Theme, Size, Font, Background opacity, Placement.
+    public void AddLook(ToolStripItemCollection items)
+    {
+        if (OpenTheme != null) items.Add(Item("Theme…", false, OpenTheme));
+
+        var size = new ToolStripMenuItem("Size");
+        foreach (var s in Scales) { int v = s; size.DropDownItems.Add(Item(v + "%", Scale() == v, () => SetScale(v))); }
+        if (Widths != null)
+        {
+            size.DropDownItems.Add(new ToolStripSeparator());
+            string[] names = { "Narrow", "Normal", "Wide" };
+            for (int i = 0; i < Widths.Length && i < 3; i++) { int v = Widths[i]; size.DropDownItems.Add(Item(names[i], CardWidth() == v, () => SetCardWidth(v))); }
+        }
+        items.Add(size);
+
+        if (FontName != null)
+        {
+            var font = new ToolStripMenuItem("Font");
+            font.DropDownItems.Add(Item("Default", FontName() == "", () => SetFontName("")));
+            foreach (var n in Fonts.Where(HasFont)) { string v = n; font.DropDownItems.Add(Item(v, FontName() == v, () => SetFontName(v))); }
+            if (FontName() != "" && !Fonts.Contains(FontName())) font.DropDownItems.Add(Item(FontName(), true, () => { }));
+            items.Add(font);
+        }
+
+        var opacity = new ToolStripMenuItem("Background opacity");
+        foreach (var o in Opacities) { int v = o; opacity.DropDownItems.Add(Item(v + "%", Opacity() == v, () => SetOpacity(v))); }
+        if (!Opacities.Contains(Opacity())) opacity.DropDownItems.Add(Item(Opacity() + "%", true, () => { }));
+        items.Add(opacity);
+
+        var place = new ToolStripMenuItem("Placement");
+        string[] layers = { "On the desktop", "Normal window", "Always on top" };
+        for (int i = 0; i < 3; i++) { int v = i; place.DropDownItems.Add(Item(layers[i], Layer() == v, () => SetLayer(v))); }
+        place.DropDownItems.Add(new ToolStripSeparator());
+        place.DropDownItems.Add(Item(LockText, Locked(), () => SetLocked(!Locked())));
+        if (ClickThrough != null) place.DropDownItems.Add(Item("Click-through when locked", ClickThrough(), () => SetClickThrough(!ClickThrough())));
+        place.DropDownItems.Add(Item("Snap to screen edges", Snap(), () => SetSnap(!Snap())));
+        items.Add(place);
+    }
+
+    // The rest: Settings…, Run at startup, Backup, then the version and Exit.
+    public void AddEnd(ToolStripItemCollection items)
+    {
+        items.Add(new ToolStripSeparator());
+        if (OpenSettings != null) items.Add(Item("Settings…", false, OpenSettings));
+        if (RunAtStartup != null) items.Add(Item("Run at startup", RunAtStartup(), () => SetRunAtStartup(!RunAtStartup())));
+        if (BackUp != null)
+        {
+            var backup = new ToolStripMenuItem("Backup");
+            backup.DropDownItems.Add(Item("Back up settings", false, BackUp));
+            backup.DropDownItems.Add(Item("Restore settings…", false, Restore));
+            backup.DropDownItems.Add(new ToolStripMenuItem("Last backup: " + LastBackup()) { Enabled = false });
+            items.Add(backup);
+        }
+        items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem(Title + " " + Version) { Enabled = false });
+        if (Exit != null) items.Add(Item("Exit", false, Exit));
+    }
+
+    public void AddAll(ToolStripItemCollection items) { AddLook(items); AddEnd(items); }
+}
+#pragma warning restore 0649
